@@ -160,9 +160,12 @@ class ReceiptControlTests(unittest.TestCase):
     def test_repeated_receipt_ids_not_silently_deduplicated(self):
         pay = receipts(('20', '30'))
         pay['payment_id'] = 'SAME'
-        r = self.checked(invoices(), pay)
-        self.assertEqual(r['all_invoices'].iloc[0].payment_count, 2)
-        self.assertEqual(r['all_invoices'].iloc[0].total_paid, 50)
+        with self.assertRaises(recon.InputValidationError) as caught:
+            recon.reconcile_payments(invoices(), pay)
+        issues = [x for x in caught.exception.issues if x['field'] == 'payment_id']
+        self.assertEqual([x['data_row'] for x in issues], [1, 2])
+        self.assertTrue(all('Repeated payment ID' in x['problem'] for x in issues))
+        self.assertEqual(list(pay.amount_paid), ['20', '30'])
 
     def test_dropped_receipt_fails_controls(self):
         r = self.checked(invoices(), receipts(('10', '20')))

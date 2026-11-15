@@ -18,8 +18,8 @@ Critical invalid inputs produce separate diagnostics (exit 2), without refreshin
 the normal report. A failed financial check produces a separate failed-checks
 workbook (exit 3). Measurable exceptions yield REVIEW with completed checks (exit 0).
 Repeated invoice IDs block; missing receipt references remain visible unmatched.
-Missing invoice-ID values, receipt-ID duplication, dates, and other broader data
-validation remain separate work. All supplied dates are used, not historical cutoffs.
+Receipt IDs must be nonblank and unique; repeated or missing IDs block the run.
+Missing invoice-ID values, dates, and other broader validation remain separate work. All supplied dates are used, not historical cutoffs.
 
 Run from the project root:
     python src/reconcile_payments.py
@@ -159,8 +159,8 @@ def collect_input_issues(invoices: pd.DataFrame, payments: pd.DataFrame) -> list
 
     Positive invoice/payment amounts, genuine zeros, and positive-receipt
     overpayments are permitted. Known unmatched receipts remain review items.
-    Missing invoice-ID values, payment-ID duplication, date/status controls and
-    the wider reconciliation redesign remain separate work.
+    Receipt IDs must be nonblank and unique, with exact source-value comparison.
+    Missing invoice-ID values and broader date/status controls remain separate work.
     """
     issues = []
     for source, frame, required, amount_column, id_column in (
@@ -188,6 +188,22 @@ def collect_input_issues(invoices: pd.DataFrame, payments: pd.DataFrame) -> list
                                    field="invoice_id", original_value=str(invoice_id),
                                    problem=("Repeated invoice ID: requires one row per invoice. "
                                             "May be duplicate records or legitimate product lines; not automatically combined.")))
+    if "payment_id" in payments:
+        ids = payments["payment_id"]
+        missing = ids.isna() | ids.astype("string").str.strip().eq("").fillna(False)
+        repeated = ~missing & ids.duplicated(keep=False)
+        # Compare nonblank IDs exactly as supplied. Do not strip, change case,
+        # deduplicate, or infer invoice allocations from repeated receipt IDs.
+        for position, (payment_id, blank, duplicate) in enumerate(zip(ids, missing, repeated), start=1):
+            if blank or duplicate:
+                issues.append(dict(
+                    source="Payments", data_row=position, record_id=_original_text(payment_id),
+                    field="payment_id", original_value=_original_text(payment_id),
+                    problem=("Missing payment ID: a nonblank unique receipt identifier is required"
+                             if blank else
+                             "Repeated payment ID: requires one unique payment ID per receipt row, intended for one invoice. "
+                             "All affected rows retained for review; none deleted, combined, or reconciled.")
+                ))
     return issues
 
 
@@ -334,8 +350,7 @@ def reconcile_payments(invoices: pd.DataFrame, payments: pd.DataFrame) -> dict[s
     unmatched.loc[missing.loc[~matched_reference], "unmatched_reason"] = "Missing invoice reference"
 
     receipt_totals, receipt_counts = {}, {}
-    # Count source records, not nonblank receipt IDs. Duplicated receipt-ID
-    # validation is separate work; never silently deduplicate input rows.
+    # Count validated receipt records; never silently deduplicate input rows.
     for _, row in matched_receipts.iterrows():
         key = row["invoice_id"]
         receipt_totals[key] = receipt_totals.get(key, 0) + _to_cents(row["amount_paid"])

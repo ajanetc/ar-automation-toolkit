@@ -166,5 +166,108 @@ class CriticalValidationTests(unittest.TestCase):
             self.assertEqual(diagnostic.read_bytes(), previous)
 
 
+    def test_identical_receipt_rows_block_without_deletion(self):
+        pay = pd.concat([payment_frame(), payment_frame()], ignore_index=True)
+        original = pay.copy(deep=True)
+        with self.assertRaises(recon.InputValidationError) as caught:
+            recon.reconcile_payments(invoice_frame(), pay)
+        issues = [x for x in caught.exception.issues if x['field'] == 'payment_id']
+        self.assertEqual([x['data_row'] for x in issues], [1, 2])
+        pd.testing.assert_frame_equal(pay, original)
+
+    def test_repeated_id_across_different_invoices_blocks(self):
+        inv = pd.concat([invoice_frame(), invoice_frame().assign(invoice_id='002')], ignore_index=True)
+        pay = pd.concat([payment_frame(), payment_frame(reference='002')], ignore_index=True)
+        with self.assertRaises(recon.InputValidationError) as caught:
+            recon.reconcile_payments(inv, pay)
+        self.assertEqual(len([x for x in caught.exception.issues if x['field'] == 'payment_id']), 2)
+
+    def test_repeated_id_with_different_amounts_blocks(self):
+        pay = pd.concat([payment_frame('20'), payment_frame('30')], ignore_index=True)
+        issues = recon.collect_input_issues(invoice_frame(), pay)
+        self.assertEqual(len(issues), 2)
+        self.assertTrue(all('Repeated payment ID' in x['problem'] for x in issues))
+
+    def test_repeated_ids_on_unknown_or_missing_references_still_block(self):
+        for reference in ['', 'UNKNOWN']:
+            with self.subTest(reference=reference):
+                pay = pd.concat([payment_frame(reference=reference)] * 2, ignore_index=True)
+                with self.assertRaises(recon.InputValidationError):
+                    recon.reconcile_payments(invoice_frame(), pay)
+
+    def test_missing_payment_id_variants_block(self):
+        for identifier in [None, pd.NA, float('nan'), '', ' ', '\t\n']:
+            with self.subTest(identifier=identifier):
+                pay = payment_frame()
+                pay['payment_id'] = identifier
+                with self.assertRaises(recon.InputValidationError) as caught:
+                    recon.reconcile_payments(invoice_frame(), pay)
+                issue = caught.exception.issues[0]
+                self.assertEqual((issue['source'], issue['data_row'], issue['field']), ('Payments', 1, 'payment_id'))
+                self.assertIn('Missing payment ID', issue['problem'])
+
+    def test_distinct_payment_ids_for_same_invoice_allowed(self):
+        pay = pd.concat([payment_frame('20'), payment_frame('30').assign(payment_id='P2')], ignore_index=True)
+        result = recon.reconcile_payments(invoice_frame(), pay)
+        row = result['all_invoices'].iloc[0]
+        self.assertEqual((row.total_paid, row.payment_count, row.balance_due), (50, 2, 50))
+        self.assertTrue(recon.build_reconciliation_checks(result).Status.eq('PASS').all())
+
+    def test_all_repeated_id_positions_reported_independent_of_dataframe_index(self):
+        pay = pd.concat([payment_frame()] * 4, ignore_index=True)
+        pay['payment_id'] = ['P1', 'P2', 'P1', 'P1']
+        pay.index = [90, 10, 10, -1]
+        issues = recon.collect_input_issues(invoice_frame(), pay)
+        self.assertEqual([x['data_row'] for x in issues], [1, 3, 4])
+        self.assertTrue(all(x['original_value'] == 'P1' for x in issues))
+
+    def test_payment_id_and_amount_issues_collected_together(self):
+        pay = pd.concat([payment_frame('bad'), payment_frame('30'), payment_frame('20')], ignore_index=True)
+        pay['payment_id'] = ['P1', 'P1', ' ']
+        issues = recon.collect_input_issues(invoice_frame(), pay)
+        self.assertEqual(len([x for x in issues if x['field'] == 'amount_paid']), 1)
+        self.assertEqual(len([x for x in issues if x['field'] == 'payment_id']), 3)
+
+    def test_cli_id_issues_generate_only_diagnostics_with_all_source_rows(self):
+        pay = pd.concat([payment_frame('20'), payment_frame('30'), payment_frame('40')], ignore_index=True)
+        pay['payment_id'] = ['P1', 'P1', ' ']
+        with tempfile.TemporaryDirectory() as folder:
+            proc, report, diagnostic = self.run_cli(folder, payment=pay)
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            self.assertFalse(report.exists())
+            wb = load_workbook(diagnostic, data_only=True)
+            self.assertEqual(wb.sheetnames, ['Summary', 'Input Issues', 'Source Invoices', 'Source Payments'])
+            self.assertTrue(wb['Summary']['B1'].value.startswith('BLOCKED'))
+            issues = list(wb['Input Issues'].values)
+            self.assertEqual([r[1] for r in issues[1:]], [1, 2, 3])
+            self.assertTrue(all(r[3] == 'payment_id' for r in issues[1:]))
+            source = list(wb['Source Payments'].values)
+            id_column = source[0].index('payment_id')
+            self.assertEqual([r[id_column] for r in source[1:]], ['P1', 'P1', ' '])
+            amount_column = source[0].index('amount_paid')
+            self.assertEqual([r[amount_column] for r in source[1:]], ['20', '30', '40'])
+
+    def test_cli_duplicate_ids_leave_previous_normal_report_unchanged(self):
+        pay = pd.concat([payment_frame()] * 2, ignore_index=True)
+        with tempfile.TemporaryDirectory() as folder:
+            report = Path(folder) / 'reconciliation_report.xlsx'
+            report.write_bytes(b'PREVIOUS REPORT - DO NOT REPLACE')
+            proc, report, diagnostic = self.run_cli(folder, payment=pay)
+            self.assertEqual(proc.returncode, 2)
+            self.assertEqual(report.read_bytes(), b'PREVIOUS REPORT - DO NOT REPLACE')
+            self.assertTrue(diagnostic.exists())
+            self.assertIn('Normal report NOT REFRESHED', proc.stdout)
+
+    def test_cli_leading_zero_payment_ids_remain_distinct_source_text(self):
+        pay = pd.concat([payment_frame('20'), payment_frame('30')], ignore_index=True)
+        pay['payment_id'] = ['001', '1']
+        with tempfile.TemporaryDirectory() as folder:
+            proc, report, diagnostic = self.run_cli(folder, payment=pay)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertTrue(report.exists())
+            self.assertFalse(diagnostic.exists())
+
+
+
 if __name__ == "__main__":
     unittest.main()

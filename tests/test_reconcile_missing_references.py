@@ -83,9 +83,10 @@ class MissingReferenceTests(unittest.TestCase):
         self.assertIn("unmatched_reason", result["unmatched_payments"].columns)
         self.assertEqual(len(result["unpaid_invoices"]), 1)
 
-    def test_repeated_unmatched_receipt_rows_are_not_dropped(self):
+    def test_distinct_unmatched_receipts_with_same_reference_and_amount_are_not_dropped(self):
         pay = receipts([None], [25])
         pay = pd.concat([pay, pay], ignore_index=True)
+        pay["payment_id"] = ["P-UNMATCHED-1", "P-UNMATCHED-2"]
         unmatched = recon.reconcile_payments(invoices(), pay)["unmatched_payments"]
         self.assertEqual(len(unmatched), 2)
         self.assertEqual(unmatched.amount_paid.sum(), 50)
