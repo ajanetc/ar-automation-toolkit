@@ -15,11 +15,24 @@ excluding the CSV header. Payments with missing/blank invoice references are
 retained as unmatched, never applied. Missing invoice IDs in the invoice file
 and broader validation remain separate work.
 
+Critical amount errors (blank, unreadable, non-finite, or unsupported negative),
+missing required columns, and repeated invoice IDs block the command-line run.
+A separate reconciliation_diagnostics.xlsx preserves loaded source records and
+lists all detected critical issues. The normal report is NOT refreshed. Exit 2
+means blocked/diagnostic failure; a normal completed run exits 0. Amount zeros
+and unmatched receipts are not blocked. Overpayment and wider tie-out redesign
+remain separate work; existing control totals are not claimed as fully verified.
+
 Run from the project root:
     python src/reconcile_payments.py
 """
 
 import argparse
+import math
+import os
+import tempfile
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import pandas as pd
@@ -84,6 +97,201 @@ def validate_unique_invoice_ids(invoices: pd.DataFrame) -> None:
     )
 
 
+
+REQUIRED_INVOICE_COLUMNS = {"invoice_id", "customer_name", "amount_usd", "days_overdue", "status"}
+REQUIRED_PAYMENT_COLUMNS = {"payment_id", "invoice_id", "amount_paid", "payment_date"}
+ISSUE_COLUMNS = ["source", "data_row", "record_id", "field", "original_value", "problem"]
+
+
+class InputValidationError(ValueError):
+    """Critical input issues prevent financial reconciliation."""
+
+    def __init__(self, issues: list[dict]):
+        self.issues = issues
+        super().__init__(f"Reconciliation blocked: {len(issues)} critical input issue(s).")
+
+
+def _original_text(value) -> str:
+    """Keep invalid values visible; never replace an unknown amount with zero."""
+    if value is None or value is pd.NA:
+        return "<missing>"
+    return str(value)
+
+
+def _amount_problem(value) -> str | None:
+    if value is None or value is pd.NA or not str(value).strip():
+        return "Missing amount; cannot be treated as zero"
+    if isinstance(value, bool):
+        return "Unreadable amount; boolean values are not monetary amounts"
+    try:
+        decimal = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return "Unreadable amount; expected a plain numeric value"
+    if not decimal.is_finite():
+        return "Non-finite amount (NaN or infinity)"
+    # The existing calculation engine uses pandas floating-point arithmetic.
+    try:
+        parsed = pd.to_numeric(value, errors="coerce")
+        representable = pd.notna(parsed) and math.isfinite(float(parsed))
+    except (TypeError, ValueError, OverflowError):
+        representable = False
+    if not representable:
+        return "Amount cannot be represented safely by the current numeric engine"
+    if decimal < 0:
+        return "Negative amount unsupported: credit/reversal treatment must be defined"
+    return None
+
+
+def collect_input_issues(invoices: pd.DataFrame, payments: pd.DataFrame) -> list[dict]:
+    """Collect ALL critical issues before grouping or payment application.
+
+    Positive invoice/payment amounts, genuine zeros, and positive-receipt
+    overpayments are permitted. Known unmatched receipts remain review items.
+    Missing invoice-ID values, payment-ID duplication, date/status controls and
+    the wider reconciliation redesign remain separate work.
+    """
+    issues = []
+    for source, frame, required, amount_column, id_column in (
+        ("Invoices", invoices, REQUIRED_INVOICE_COLUMNS, "amount_usd", "invoice_id"),
+        ("Payments", payments, REQUIRED_PAYMENT_COLUMNS, "amount_paid", "payment_id"),
+    ):
+        for column in sorted(required - set(frame.columns)):
+            issues.append(dict(source=source, data_row=None, record_id="", field=column,
+                               original_value="<column missing>", problem="Required column is missing"))
+        if amount_column in frame:
+            for position, (_, row) in enumerate(frame.iterrows(), start=1):
+                value = row[amount_column]
+                problem = _amount_problem(value)
+                if problem:
+                    issues.append(dict(source=source, data_row=position,
+                                       record_id=_original_text(row.get(id_column, "")),
+                                       field=amount_column, original_value=_original_text(value), problem=problem))
+    if "invoice_id" in invoices:
+        ids = invoices["invoice_id"]
+        nonblank = ids.notna() & ids.astype("string").str.strip().ne("").fillna(False)
+        repeated = nonblank & ids.duplicated(keep=False)
+        for position, (invoice_id, duplicate) in enumerate(zip(ids, repeated), start=1):
+            if duplicate:
+                issues.append(dict(source="Invoices", data_row=position, record_id=str(invoice_id),
+                                   field="invoice_id", original_value=str(invoice_id),
+                                   problem=("Repeated invoice ID: requires one row per invoice. "
+                                            "May be duplicate records or legitimate product lines; not automatically combined.")))
+    return issues
+
+
+def _read_source_csv(path: str, source: str) -> tuple[pd.DataFrame, list[dict]]:
+    """Preserve source text, blanks, leading zeros and tokens such as 'NaN'."""
+    try:
+        return pd.read_csv(path, dtype=str, keep_default_na=False, skip_blank_lines=False), []
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(), []
+    except (OSError, UnicodeError, pd.errors.ParserError) as exc:
+        return pd.DataFrame(), [dict(source=source, data_row=None, record_id="", field="input_file",
+                                    original_value=str(path), problem=f"Input could not be read: {exc}")]
+
+
+def diagnostic_output_path(report_path: str | Path) -> Path:
+    report_path = Path(report_path)
+    name = ("reconciliation_diagnostics.xlsx" if report_path.stem == "reconciliation_report"
+            else f"{report_path.stem}_diagnostics.xlsx")
+    return report_path.with_name(name)
+
+
+def _write_diagnostic_table(wb, name: str, frame: pd.DataFrame) -> None:
+    ws = wb.create_sheet(name)
+    if not len(frame.columns):
+        ws.append(["No source rows/columns available. See Input Issues for details."])
+        ws.column_dimensions["A"].width = 75
+        return
+    ws.append([str(column) for column in frame.columns])
+    for values in frame.itertuples(index=False, name=None):
+        row = []
+        for column, value in zip(frame.columns, values):
+            if value is None or value is pd.NA or (not isinstance(value, str) and pd.isna(value)):
+                row.append(None)
+            elif name == "Input Issues" and column == "data_row":
+                row.append(int(value))
+            else:
+                row.append(str(value))
+        ws.append(row)
+    if name == "Input Issues" and "data_row" in frame.columns:
+        row_column = list(frame.columns).index("data_row") + 1
+        for cells in ws.iter_rows(min_row=2, min_col=row_column, max_col=row_column):
+            cells[0].number_format = INT_FORMAT
+    # Source cells are literal text: never execute source values as Excel formulas.
+    for row in ws:
+        for cell in row:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+    _style_header_row(ws, len(frame.columns))
+    for cell in ws[1]:
+        cell.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 32
+    ws.auto_filter.ref = ws.dimensions
+    _autosize_columns(ws)
+    if name == "Input Issues":
+        ws.column_dimensions["F"].width = 78
+        for row in range(2, ws.max_row + 1):
+            ws.row_dimensions[row].height = 48
+    else:
+        for row in range(2, ws.max_row + 1):
+            ws.row_dimensions[row].height = 30
+
+
+def generate_diagnostic_report(invoices: pd.DataFrame, payments: pd.DataFrame,
+                               issues: list[dict], output_path: str | Path,
+                               report_path: str | Path, invoice_source: str = "",
+                               payment_source: str = "") -> None:
+    """Write investigation evidence, never partial financial reconciliation totals."""
+    output_path, report_path = Path(output_path), Path(report_path)
+    if output_path.resolve() == report_path.resolve():
+        raise ValueError("Diagnostic path must differ from the financial report path")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+    ws.append(["Run Status", "BLOCKED—reconciliation not completed"])
+    ws.append(["Generated (UTC)", datetime.now(timezone.utc).isoformat(timespec="seconds")])
+    ws.append(["Input issue count", len(issues)])
+    ws.append(["Invoice data records loaded", len(invoices)])
+    ws.append(["Payment data records loaded", len(payments)])
+    ws.append(["Invoice source", str(invoice_source)])
+    ws.append(["Payment source", str(payment_source)])
+    ws.append(["Normal report path", str(report_path)])
+    ws.append(["Normal report status", "NOT REFRESHED. Any existing normal report belongs to an earlier run."])
+    ws.append(["Required action", "Correct the source issues and rerun. No payments were applied in this blocked run."])
+    ws.append(["Financial results", "Not calculated. Unknown amounts are not zero; no financial totals are presented."])
+    ws.append(["Evidence", "Source tabs preserve loaded cell text. Input Issues lists 1-based data rows, excluding the CSV header."])
+    ws.append(["Input scope", "If an input could not be read, its source tab is unavailable; inspect the file-level issue."])
+    ws.append(["Diagnostics scope", "This workbook describes this blocked run only; it is not proof of the latest run status after a rerun."])
+    for row in ws:
+        row[0].font = Font(bold=True)
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.row_dimensions[row[0].row].height = 34
+    for row_number in (3, 4, 5):
+        ws.cell(row_number, 2).number_format = INT_FORMAT
+    _style_header_row(ws, 2)
+    for cell in ws[1]:
+        cell.fill = ALERT_FILL
+        cell.font = Font(bold=True, color="9C0006")
+    ws.row_dimensions[1].height = 38
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 100
+    _write_diagnostic_table(wb, "Input Issues", pd.DataFrame(issues, columns=ISSUE_COLUMNS))
+    _write_diagnostic_table(wb, "Source Invoices", invoices)
+    _write_diagnostic_table(wb, "Source Payments", payments)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".reconciliation_diagnostic_", suffix=".xlsx", dir=output_path.parent)
+    os.close(fd)
+    try:
+        wb.save(temp_name)
+        os.replace(temp_name, output_path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
 def reconcile_payments(
     invoices: pd.DataFrame, payments: pd.DataFrame
 ) -> dict[str, pd.DataFrame]:
@@ -97,13 +305,18 @@ def reconcile_payments(
       - overpayments (only populated if balance_due < -MATCH_TOLERANCE)
     """
     # Check before numeric coercion, grouping, merging, or payment application.
-    validate_unique_invoice_ids(invoices)
+    if "invoice_id" in invoices:
+        # Keep the existing library exception and repeated-ID tests compatible.
+        validate_unique_invoice_ids(invoices)
+    critical_issues = collect_input_issues(invoices, payments)
+    if critical_issues:
+        raise InputValidationError(critical_issues)
     invoices = invoices.copy()
     payments = payments.copy()
 
-    invoices["amount_usd"] = pd.to_numeric(invoices["amount_usd"], errors="coerce").fillna(0.0)
+    invoices["amount_usd"] = pd.to_numeric(invoices["amount_usd"], errors="raise")
     invoices["days_overdue"] = pd.to_numeric(invoices["days_overdue"], errors="coerce").fillna(0).astype(int)
-    payments["amount_paid"] = pd.to_numeric(payments["amount_paid"], errors="coerce").fillna(0.0)
+    payments["amount_paid"] = pd.to_numeric(payments["amount_paid"], errors="raise")
 
     # Classify individual receipts BEFORE grouping. groupby drops null keys;
     # blank references must never be applied, even if an invoice ID is blank too.
@@ -350,7 +563,7 @@ def generate_reconciliation_report(
     wb.save(output_path)
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Reconcile payment receipts against invoices."
     )
@@ -373,12 +586,30 @@ def main() -> None:
 
     print(f"Loading invoices from {args.invoices}...")
     # Preserve identifier text, including leading zeros.
-    invoices = pd.read_csv(args.invoices, dtype={"invoice_id": "string"})
+    invoices, invoice_read_issues = _read_source_csv(args.invoices, "Invoices")
     print(f"  Loaded {len(invoices)} invoices")
 
     print(f"Loading payments from {args.payments}...")
-    payments = pd.read_csv(args.payments, dtype={"invoice_id": "string"})
+    payments, payment_read_issues = _read_source_csv(args.payments, "Payments")
     print(f"  Loaded {len(payments)} payments")
+
+    critical_issues = invoice_read_issues + payment_read_issues + collect_input_issues(invoices, payments)
+    if critical_issues:
+        diagnostics = diagnostic_output_path(args.output)
+        print(f"BLOCKED—reconciliation not completed: {len(critical_issues)} critical input issue(s).")
+        print("No payments were applied. No normal reconciliation report will be generated.")
+        print(f"Normal report NOT REFRESHED: {args.output}")
+        print("Any existing normal report belongs to an earlier run; do not treat it as this run's result.")
+        try:
+            generate_diagnostic_report(invoices, payments, critical_issues, diagnostics, args.output,
+                                       args.invoices, args.payments)
+        except Exception as exc:
+            print(f"ERROR: Could not write diagnostic workbook: {exc}")
+            print("Check folder permissions and close the diagnostic workbook if open in Excel.")
+            return 2
+        print(f"Diagnostic workbook: {diagnostics}")
+        print("Correct the input issues listed there, then rerun.")
+        return 2
 
     print("Reconciling...")
     results = reconcile_payments(invoices, payments)
@@ -389,11 +620,16 @@ def main() -> None:
     generate_reconciliation_report(results, args.output)
 
     print("Done. Open the workbook to review the reconciliation.")
+    previous_diagnostics = diagnostic_output_path(args.output)
+    if previous_diagnostics.exists():
+        print(f"Note: earlier diagnostic workbook remains at {previous_diagnostics}; "
+              "it is not the status of this successful run.")
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except DuplicateInvoiceIDError as exc:
         raise SystemExit(
             f"ERROR: {exc}\n"
