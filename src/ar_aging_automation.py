@@ -10,6 +10,10 @@ use only positive balances not marked Paid. Source statuses are not overwritten.
 Run from the project root:
     python src/ar_aging_automation.py
     python src/ar_aging_automation.py --payments data/payment_receipts.csv
+    python src/ar_aging_automation.py --payments data/payment_receipts.csv --aging-date 2026-11-14
+
+The aging-date option recalculates overdue days only, not historical balances.
+Report Basis notes are generated at the bottom of Summary.
 """
 
 import argparse
@@ -108,7 +112,7 @@ def load_and_validate(
 
     supplied_days = pd.to_numeric(df["days_overdue"], errors="coerce").fillna(0).astype(int)
 
-    # 6. Optional calendar recalculation when --as-of-date is supplied
+    # 6. Aging-only recalculation (--aging-date; --as-of-date remains an alias)
     if as_of_date:
         cutoff = pd.to_datetime(as_of_date, format="%Y-%m-%d")
         calc_days = (cutoff - df["due_date"]).dt.days.clip(lower=0).fillna(supplied_days).astype(int)
@@ -196,6 +200,7 @@ def load_and_validate(
 
     # DataFrame.copy() in calculate_aging_buckets preserves these source records.
     df.attrs["payment_receipt_records"] = receipt_records
+    df.attrs["aging_date"] = as_of_date
     return df, issues
 
 
@@ -463,12 +468,66 @@ def write_reference_tab(wb, name: str, data: pd.DataFrame) -> None:
     ws.freeze_panes = "C2" if name == "All Invoices" else "A2"
 
 
+
+def write_report_basis(ws, has_payments: bool, aging_date: Optional[str] = None) -> None:
+    """Append explanatory notes below Summary, without shifting existing tables."""
+    if aging_date:
+        aging_basis = (
+            f"Overdue days recalculated from due dates as of {aging_date}. "
+            "If a due date is unavailable, supplied overdue days are retained. "
+            "See Validation Issues for detected date problems."
+        )
+    else:
+        aging_basis = (
+            "Uses overdue days supplied in the invoice CSV. "
+            "No reporting date has been established for those values."
+        )
+    if has_payments:
+        payment_basis = "Uses all supplied matching receipts, regardless of payment date."
+        balance_basis = "Original invoice amount minus all supplied matching payments."
+        paid_treatment = (
+            "Invoices marked Paid are excluded from collections and risk. "
+            "Missing or insufficient receipt support is listed in Paid Status Exceptions."
+        )
+    else:
+        payment_basis = "Not evaluated—no payment file supplied; no receipts deducted."
+        balance_basis = (
+            "Calculated remaining balances equal original invoice amounts because "
+            "recorded payments default to zero. Actual payment-adjusted balances are not established."
+        )
+        paid_treatment = (
+            "Invoices marked Paid are excluded from collections and risk. "
+            "Their payment support is not evaluated without a receipts file."
+        )
+    ws.append([])
+    ws.append(["Report Basis", "Description"])
+    header_row = ws.max_row
+    ws.merge_cells(start_row=header_row, start_column=2, end_row=header_row, end_column=3)
+    _style_header_row(ws, 3, row_idx=header_row)
+    for label, text in (
+        ("Aging basis", aging_basis),
+        ("Payment basis", payment_basis),
+        ("Balance calculation", balance_basis),
+        ("Paid-status treatment", paid_treatment),
+        ("Limitation", "This workbook does not reconstruct historical balances as of a specified date."),
+    ):
+        ws.append([label, text])
+        row = ws.max_row
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=3)
+        ws.cell(row, 1).font = Font(bold=True)
+        ws.cell(row, 1).alignment = Alignment(vertical="top", wrap_text=True)
+        ws.cell(row, 2).alignment = Alignment(vertical="top", wrap_text=True)
+        # Existing Summary widths remain unchanged; allow space for wrapped notes.
+        ws.row_dimensions[row].height = 18 * max(2, (len(text) + 69) // 70) + 6
+
+
 def generate_summary_report(
     df: pd.DataFrame,
     issues: list[dict],
     output_path: str | Path,
     has_payments: bool = False,
     payment_receipt_records: Optional[list[dict]] = None,
+    aging_date: Optional[str] = None,
 ) -> None:
     """Write eight review tabs. Receipts are preserved at source-record grain.
 
@@ -602,6 +661,8 @@ def generate_summary_report(
     _style_header_row(ws_summary, 3, row_idx=1)
     _style_header_row(ws_summary, 3, row_idx=bucket_header_row)
     _autosize_columns(ws_summary)
+    effective_aging_date = aging_date if aging_date is not None else df.attrs.get("aging_date")
+    write_report_basis(ws_summary, has_payments, effective_aging_date)
 
     # ----- Sheet 2: Detail >30d -----
     detail_df = collectible_df[collectible_df["days_overdue"] > 30].sort_values("days_overdue", ascending=False)
@@ -681,9 +742,12 @@ def main() -> None:
         help="Optional path to payment receipts CSV to net partial payments",
     )
     parser.add_argument(
-        "--as-of-date",
+        "--aging-date", "--as-of-date",
+        dest="aging_date",
         default=None,
-        help="Optional cutoff date (YYYY-MM-DD) to recalculate days_overdue from due_date",
+        help=("Optional aging date (YYYY-MM-DD) to recalculate overdue days only; "
+              "does not filter invoices or receipts to historical balances. "
+              "--as-of-date is retained as an alias."),
     )
     parser.add_argument(
         "-o", "--output",
@@ -696,7 +760,7 @@ def main() -> None:
     df, issues = load_and_validate(
         args.input_file,
         payments_path=args.payments,
-        as_of_date=args.as_of_date,
+        as_of_date=args.aging_date,
     )
     print(f"  Loaded {len(df)} invoices")
     print(f"  Found {len(issues)} validation issues")
@@ -710,6 +774,7 @@ def main() -> None:
         issues,
         args.output,
         has_payments=bool(args.payments),
+        aging_date=args.aging_date,
     )
     print("Done. Open the workbook to review the report.")
 
