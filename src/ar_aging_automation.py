@@ -4,7 +4,8 @@ AR Aging Automation - core analysis script.
 Loads an invoice extract (and optional payment receipts), validates data integrity
 and cross-field controls, calculates net open AR aging buckets, flags high-risk
 customers, and writes a formatted multi-sheet Excel report, including a separate
-Paid Status Exceptions review tab. Source statuses are not overwritten.
+All Invoices, Payment Receipts, Paid Status Exceptions, and Credit Balances tabs. Collections and risk
+use only positive balances not marked Paid. Source statuses are not overwritten.
 
 Run from the project root:
     python src/ar_aging_automation.py
@@ -48,7 +49,8 @@ def load_and_validate(
     as_of_date: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, list[dict]]:
     """Load invoices (and optional payments), run control checks, and return (df, issues)."""
-    df = pd.read_csv(file_path)
+    df = pd.read_csv(file_path, dtype={"invoice_id": "string"})
+    receipt_records = None
     issues: list[dict] = []
 
     # 1. Duplicate invoice_id check
@@ -150,7 +152,9 @@ def load_and_validate(
 
     # 8. Optional payment receipt application & ghost-Paid audit control
     if payments_path:
-        pay = pd.read_csv(payments_path)
+        pay = pd.read_csv(payments_path, dtype={"invoice_id": "string", "payment_id": "string"})
+        # Preserve every supplied payment record before numeric coercion/aggregation.
+        receipt_records = pay.to_dict("records")
         pay["amount_paid"] = pd.to_numeric(pay["amount_paid"], errors="coerce").fillna(0.0)
 
         # Flag orphan payments referencing unknown invoices
@@ -190,6 +194,8 @@ def load_and_validate(
         df["amount_paid"] = 0.0
         df["net_open_usd"] = df["amount_usd"].round(2)
 
+    # DataFrame.copy() in calculate_aging_buckets preserves these source records.
+    df.attrs["payment_receipt_records"] = receipt_records
     return df, issues
 
 
@@ -274,13 +280,24 @@ def calculate_aging_buckets(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def collectible_invoices(df: pd.DataFrame) -> pd.DataFrame:
+    """Positive cent-rounded balances not marked Paid; not a credit-policy decision.
+
+    Unsupported Paid records remain in Paid Status Exceptions. Missing/invalid
+    balances are ineligible, with broader input validation handled separately.
+    """
+    is_paid = df["status"].astype(str).str.strip().str.lower().eq("paid")
+    return df.loc[~is_paid & df["net_open_usd"].round(2).gt(0)].copy()
+
+
 def flag_risk_accounts(
     open_df: pd.DataFrame,
     min_overdue_count: int = RISK_MIN_OVERDUE_COUNT,
     min_overdue_amount: float = RISK_MIN_OVERDUE_AMOUNT,
 ) -> pd.DataFrame:
     """Return one row per customer flagged as high-risk based on net open overdue balance."""
-    overdue = open_df[open_df["days_overdue"] > 0]
+    eligible = collectible_invoices(open_df)
+    overdue = eligible[eligible["days_overdue"] > 0]
     if overdue.empty:
         return pd.DataFrame(columns=["customer_name", "overdue_count", "overdue_amount", "max_days_overdue"])
 
@@ -330,7 +347,7 @@ def _autosize_columns(ws) -> None:
 
 def _format_dataframe_columns(ws, df: pd.DataFrame) -> None:
     currency_cols = {"amount_usd", "overdue_amount", "total_amount", "amount_paid", "net_open_usd"}
-    int_cols = {"days_overdue", "overdue_count", "max_days_overdue", "invoice_count"}
+    int_cols = {"days_overdue", "overdue_count", "max_days_overdue", "invoice_count", "payment_receipt_count"}
     date_cols = {"invoice_date", "due_date", "payment_date"}
 
     for col_idx, col_name in enumerate(df.columns, start=1):
@@ -359,28 +376,127 @@ def _write_dataframe(ws, df: pd.DataFrame) -> None:
     _autosize_columns(ws)
 
 
+
+def build_all_invoices(df: pd.DataFrame, issues: list[dict], has_payments: bool) -> pd.DataFrame:
+    """One row per input invoice record; no duplication from individual receipts.
+
+    Duplicate invoice IDs, if supplied, remain separate flagged source records.
+    A calculated positive balance is not confirmation of collectibility.
+    """
+    columns = ["invoice_id", "customer_name", "invoice_date", "due_date", "po_number", "status",
+               "amount_usd", "amount_paid", "net_open_usd", "days_overdue", "aging_bucket"]
+    result = df[columns].copy()
+    paid = df["status"].astype(str).str.strip().str.lower().eq("paid")
+    balance = df["net_open_usd"].round(2)
+    result["review_category"] = "Invalid/missing balance—review validation notes"
+    result.loc[~paid & balance.gt(0), "review_category"] = "Positive non-Paid balance—collections candidate"
+    result.loc[balance.eq(0), "review_category"] = "Zero remaining balance"
+    result.loc[paid, "review_category"] = (
+        "Paid—supported by supplied payment total" if has_payments else
+        "Paid—payment support not evaluated"
+    )
+    if has_payments:
+        unsupported = paid & (df["payment_receipt_count"].eq(0) | balance.gt(0))
+        result.loc[unsupported, "review_category"] = "Paid status—payment not supported by receipts"
+    result.loc[balance.lt(0), "review_category"] = "Credit balance—review, not collections"
+    notes = {}
+    for issue in issues:
+        key = str(issue.get("invoice_id", ""))
+        text = f"{issue.get('field', '')}: {issue.get('problem', '')}"
+        if text not in notes.setdefault(key, []):
+            notes[key].append(text)
+    result["validation_notes"] = result["invoice_id"].map(lambda x: " | ".join(notes.get(str(x), [])))
+    result["payment_support_scope"] = (
+        "Supplied receipts only; positive balance is not proof of collectibility"
+        if has_payments else
+        "Not evaluated—no receipts file supplied; amount_paid defaults to zero"
+    )
+    return result
+
+
+def build_payment_receipts(df: pd.DataFrame, records: list[dict]) -> pd.DataFrame:
+    """Keep receipt-level grain, including orphans and the original amount values.
+
+    Matched means only that the invoice reference exists, not that the receipt
+    is valid/unique. Payment dates are preserved as supplied, not cutoff-filtered.
+    """
+    columns = ["payment_id", "invoice_id", "payment_date", "amount_paid"]
+    pay = pd.DataFrame(records, columns=columns)
+    known_ids = set(df["invoice_id"].dropna())
+    # Lookup without a merge: duplicate invoice rows must not multiply receipts.
+    names = {}
+    for invoice_id, customer in zip(df["invoice_id"], df["customer_name"]):
+        if pd.notna(invoice_id) and pd.notna(customer):
+            names.setdefault(invoice_id, set()).add(str(customer))
+    def customer_for(invoice_id):
+        customers = names.get(invoice_id, set())
+        if len(customers) == 1:
+            return next(iter(customers))
+        return "Multiple customers—review invoice IDs" if customers else None
+    matched = pay["invoice_id"].notna() & pay["invoice_id"].isin(known_ids)
+    pay["customer_name"] = pay["invoice_id"].map(customer_for)
+    pay["invoice_match_result"] = matched.map({True: "Matched", False: "No matching invoice"})
+    # Store valid dates as Excel dates, retaining invalid source text for review.
+    parsed_dates = pd.to_datetime(pay["payment_date"], format="%Y-%m-%d", errors="coerce")
+    pay["payment_date"] = [parsed if pd.notna(parsed) else original
+                           for original, parsed in zip(pay["payment_date"], parsed_dates)]
+    return pay
+
+
+def write_reference_tab(wb, name: str, data: pd.DataFrame) -> None:
+    """Filterable working sheet, preserving values rather than hiding bad inputs."""
+    ws = wb.create_sheet(name)
+    _write_dataframe(ws, data)
+    ws.auto_filter.ref = ws.dimensions
+    ws.row_dimensions[1].height = 34
+    for cell in ws[1]:
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for column in ("review_category", "validation_notes", "payment_support_scope"):
+        if column in data.columns:
+            idx = data.columns.get_loc(column) + 1
+            ws.column_dimensions[get_column_letter(idx)].width = 60 if column == "validation_notes" else 46
+            for row in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
+                row[0].alignment = Alignment(wrap_text=True, vertical="top")
+    if name == "All Invoices":
+        for row_idx in range(2, len(data) + 2):
+            ws.row_dimensions[row_idx].height = 60
+    ws.freeze_panes = "C2" if name == "All Invoices" else "A2"
+
+
 def generate_summary_report(
     df: pd.DataFrame,
     issues: list[dict],
     output_path: str | Path,
     has_payments: bool = False,
+    payment_receipt_records: Optional[list[dict]] = None,
 ) -> None:
-    """Write a multi-sheet Excel workbook to output_path."""
+    """Write eight review tabs. Receipts are preserved at source-record grain.
+
+    Invoice and payment tabs are alternative views, not amounts to add together.
+    Derived values are generated by this script; edits in Excel do not recalculate them.
+    Historical cutoff handling and broader validation remain separate work.
+    """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     is_paid = df["status"].astype(str).str.strip().str.lower() == "paid"
     paid_df = df[is_paid].copy()
+    # Retain signed non-Paid balances for the existing accounting summary.
     open_df = df[~is_paid].copy()
+    collectible_df = collectible_invoices(df)
+    credit_df = df.loc[df["net_open_usd"].round(2).lt(0)].copy()
+    nonpaid_credits = open_df.loc[open_df["net_open_usd"].round(2).lt(0)]
+    zero_nonpaid = open_df.loc[open_df["net_open_usd"].round(2).eq(0)]
+    collectible_ar = float(collectible_df["net_open_usd"].sum())
 
     gross_billed = float(df["amount_usd"].sum())
     settled_paid_invoices = float(paid_df["amount_usd"].sum())
     partial_payments_applied = float(open_df["amount_paid"].sum())
     net_open_ar = float(open_df["net_open_usd"].sum())
 
-    overdue_df = open_df[open_df["days_overdue"] > 0]
+    overdue_df = collectible_df[collectible_df["days_overdue"] > 0]
     total_overdue = float(overdue_df["net_open_usd"].sum())
-    pct_overdue = (total_overdue / net_open_ar * 100) if net_open_ar else 0.0
+    pct_overdue = (total_overdue / collectible_ar * 100) if collectible_ar else 0.0
 
     # Defensive accounting control assertion
     bucket_sum = round(float(open_df["net_open_usd"].sum()), 2)
@@ -396,19 +512,20 @@ def generate_summary_report(
 
     if has_payments:
         partial_count = int((open_df["amount_paid"] > 0).sum())
-        ws_summary.append(["Less: Partial Payments Applied", round(-partial_payments_applied, 2), partial_count])
+        ws_summary.append(["Less: Payments on non-Paid invoices", round(-partial_payments_applied, 2), partial_count])
         net_row_idx = 5
     else:
         net_row_idx = 4
 
-    ws_summary.append(["Net Open AR", round(net_open_ar, 2), len(open_df)])
+    ws_summary.append(["Net AR: non-Paid, including credits", round(net_open_ar, 2), len(open_df)])
     ws_summary.append(["Total Overdue (>0 Days)", round(total_overdue, 2), len(overdue_df)])
-    ws_summary.append(["% of Open AR Overdue", f"{pct_overdue:.1f}%", None])
+    ws_summary.append(["% of Collectible AR Overdue", pct_overdue / 100, None])
     ws_summary.append([])  # spacer
 
     for r in range(2, net_row_idx + 2):
         ws_summary.cell(row=r, column=2).number_format = CURRENCY_FORMAT
         ws_summary.cell(row=r, column=3).number_format = INT_FORMAT
+    ws_summary.cell(row=net_row_idx + 2, column=2).number_format = "0.0%"
     ws_summary.cell(row=net_row_idx + 2, column=2).alignment = Alignment(horizontal="right")
 
     for col_idx in (1, 2, 3):
@@ -417,7 +534,7 @@ def generate_summary_report(
         cell.fill = SUBTOTAL_FILL
 
     bucket_header_row = net_row_idx + 4
-    ws_summary.append(["Aging Bucket (Net Open AR)", "Invoice Count", "Net Open Amount"])
+    ws_summary.append(["Aging: non-Paid, including credits", "Invoice Count", "Net Open Amount"])
     bucket_summary = (
         open_df.groupby("aging_bucket")
         .agg(invoice_count=("invoice_id", "count"), total_amount=("net_open_usd", "sum"))
@@ -431,13 +548,34 @@ def generate_summary_report(
         ws_summary.cell(row=excel_row, column=3).number_format = CURRENCY_FORMAT
 
     total_row_idx = bucket_header_row + 1 + len(AGING_BUCKETS)
-    ws_summary.append(["Total Net Open AR", int(bucket_summary["invoice_count"].sum()), round(float(bucket_summary["total_amount"].sum()), 2)])
+    ws_summary.append(["Total non-Paid AR (signed)", int(bucket_summary["invoice_count"].sum()), round(float(bucket_summary["total_amount"].sum()), 2)])
     ws_summary.cell(row=total_row_idx, column=2).number_format = INT_FORMAT
     ws_summary.cell(row=total_row_idx, column=3).number_format = CURRENCY_FORMAT
     for col_idx in (1, 2, 3):
         cell = ws_summary.cell(row=total_row_idx, column=col_idx)
         cell.font = SUBTOTAL_FONT
         cell.fill = SUBTOTAL_FILL
+
+    # Explain the collections population without hiding zero/credit balances.
+    ws_summary.append([])
+    ws_summary.append(["Collections eligibility: non-Paid", "Amount", "Invoice Count"])
+    _style_header_row(ws_summary, 3, row_idx=ws_summary.max_row)
+    for label, population in (
+        ("Positive remaining balances", collectible_df),
+        ("Credit balances (signed)", nonpaid_credits),
+        ("Zero remaining balances", zero_nonpaid),
+    ):
+        ws_summary.append([label, round(float(population["net_open_usd"].sum()), 2), len(population)])
+        ws_summary.cell(ws_summary.max_row, 2).number_format = CURRENCY_FORMAT
+        ws_summary.cell(ws_summary.max_row, 3).number_format = INT_FORMAT
+    ws_summary.append([
+        "Only positive non-Paid balances enter collections/risk. Signed AR and aging above "
+        "retain credits and zero-balance records; the overdue percentage uses positive balances only."
+    ])
+    eligibility_note = ws_summary.max_row
+    ws_summary.merge_cells(start_row=eligibility_note, start_column=1, end_row=eligibility_note, end_column=3)
+    ws_summary.cell(eligibility_note, 1).alignment = Alignment(wrap_text=True, vertical="top")
+    ws_summary.row_dimensions[eligibility_note].height = 60
 
     # Exceptions are visible but are not added to collectible AR.
     exceptions = paid_status_exceptions(df) if has_payments else None
@@ -466,7 +604,7 @@ def generate_summary_report(
     _autosize_columns(ws_summary)
 
     # ----- Sheet 2: Detail >30d -----
-    detail_df = open_df[open_df["days_overdue"] > 30].sort_values("days_overdue", ascending=False)
+    detail_df = collectible_df[collectible_df["days_overdue"] > 30].sort_values("days_overdue", ascending=False)
     if not has_payments and "amount_paid" in detail_df.columns:
         detail_df = detail_df.drop(columns=["amount_paid", "net_open_usd"])
 
@@ -478,10 +616,10 @@ def generate_summary_report(
                 for col_idx in range(1, len(detail_df.columns) + 1):
                     ws_detail.cell(row=row_idx, column=col_idx).fill = RISK_FILL
     else:
-        ws_detail.append(["No open invoices >30 days overdue"])
+        ws_detail.append(["No collectible invoices >30 days overdue"])
 
     # ----- Sheet 3: Risk Accounts -----
-    risk_df = flag_risk_accounts(open_df)
+    risk_df = flag_risk_accounts(collectible_df)
     ws_risk = wb.create_sheet("Risk Accounts")
     if not risk_df.empty:
         _write_dataframe(ws_risk, risk_df)
@@ -496,7 +634,34 @@ def generate_summary_report(
     else:
         ws_issues.append(["No validation issues found"])
 
+    write_reference_tab(wb, "All Invoices", build_all_invoices(df, issues, has_payments))
+    if has_payments:
+        records = payment_receipt_records
+        if records is None:
+            records = df.attrs.get("payment_receipt_records")
+        if records is None:
+            raise ValueError("Receipt-level records are required to create Payment Receipts.")
+        write_reference_tab(wb, "Payment Receipts", build_payment_receipts(df, records))
+    else:
+        ws_receipts = wb.create_sheet("Payment Receipts")
+        ws_receipts.append(["No payment file supplied—not evaluated."])
+        ws_receipts.column_dimensions["A"].width = 65
+
     write_paid_status_exceptions(wb, exceptions, has_payments)
+    # Preserve every negative balance, including Paid-status overpayments.
+    ws_credit = wb.create_sheet("Credit Balances")
+    if not credit_df.empty:
+        credit_columns = ["invoice_id", "customer_name", "invoice_date", "due_date", "status",
+                          "amount_usd", "amount_paid", "net_open_usd", "aging_bucket"]
+        _write_dataframe(ws_credit, credit_df[credit_columns])
+        ws_credit.auto_filter.ref = ws_credit.dimensions
+    else:
+        ws_credit.append(["No negative remaining balances identified."])
+    # Public move_sheet API, preserving sheet content and formatting.
+    desired_order = ["Summary", "All Invoices", "Payment Receipts", "Detail >30d", "Risk Accounts",
+                     "Paid Status Exceptions", "Credit Balances", "Validation Issues"]
+    for target, name in enumerate(desired_order):
+        wb.move_sheet(name, offset=target - wb.sheetnames.index(name))
     wb.save(output_path)
 
 
