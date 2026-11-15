@@ -97,14 +97,14 @@ class MissingReferenceTests(unittest.TestCase):
             output = Path(temp) / "report.xlsx"
             recon.generate_reconciliation_report(result, output)
             wb = load_workbook(output, data_only=True)
-            summary = {row[0]: row[1:] for row in wb["Summary"].values if row[0]}
-            self.assertEqual(summary["Total Cash Receipts Imported"], (4, 67))
-            self.assertEqual(summary["  Less: Unapplied / Orphan Cash"], (3, -27))
-            self.assertEqual(summary["Total Cash Applied to Subledger"], (1, 40))
-            self.assertEqual(wb["Unmatched Payments"].max_row - 1, 3)
-            self.assertIn("unmatched_reason", [c.value for c in wb["Unmatched Payments"][1]])
+            summary = {row[0]: row[1:3] for row in wb["Summary"].values if row[0]}
+            self.assertEqual(summary["Total supplied receipts"], (4, 67))
+            self.assertEqual(summary["Receipts Without Corresponding Invoices"], (3, 27))
+            self.assertEqual(summary["Invoice-reference-matched receipts"], (1, 40))
+            self.assertEqual(wb["Receipts Without Invoices"].max_row - 1, 3)
+            self.assertIn("Review reason", [c.value for c in wb["Receipts Without Invoices"][1]])
             # Independent source arithmetic, not the report's category sums.
-            self.assertEqual(Decimal(str(summary["Total Cash Receipts Imported"][1])),
+            self.assertEqual(Decimal(str(summary["Total supplied receipts"][1])),
                              sum((Decimal(str(x)) for x in pay.amount_paid), Decimal(0)))
 
 

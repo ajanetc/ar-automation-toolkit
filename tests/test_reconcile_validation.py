@@ -133,7 +133,7 @@ class CriticalValidationTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 self.assertTrue(report.exists())
                 self.assertFalse(diagnostic.exists())
-                self.assertEqual(load_workbook(report)["Unmatched Payments"].max_row - 1, 1)
+                self.assertEqual(load_workbook(report)["Receipts Without Invoices"].max_row - 1, 1)
 
     def test_custom_output_has_separate_diagnostic_path(self):
         self.assertEqual(recon.diagnostic_output_path("out/custom.xlsx"), Path("out/custom_diagnostics.xlsx"))
