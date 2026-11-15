@@ -5,13 +5,15 @@ Produces a multi-sheet Excel report with full billing and cash control tie-outs:
   1. Summary            — bucket totals + subledger & cash control reconciliation
   2. Matched            — payment fully covers the invoice (within $0.01)
   3. Partial            — payment received, balance still owed
-  4. Unmatched Payments — payments with no matching invoice (orphans)
+  4. Unmatched Payments — missing or unknown invoice references, with reasons
   5. Unpaid Invoices    — invoices with $0 payment received
 
 Input requirement: one row per invoice. Repeated nonblank invoice IDs stop
 reconciliation before payment application; records are never automatically
 combined or deleted. Row numbers in validation messages are 1-based data rows,
-excluding the CSV header. Missing IDs and other validation remain separate work.
+excluding the CSV header. Payments with missing/blank invoice references are
+retained as unmatched, never applied. Missing invoice IDs in the invoice file
+and broader validation remain separate work.
 
 Run from the project root:
     python src/reconcile_payments.py
@@ -103,26 +105,30 @@ def reconcile_payments(
     invoices["days_overdue"] = pd.to_numeric(invoices["days_overdue"], errors="coerce").fillna(0).astype(int)
     payments["amount_paid"] = pd.to_numeric(payments["amount_paid"], errors="coerce").fillna(0.0)
 
-    # Sum payments per invoice (handles multiple partial payments on one invoice)
+    # Classify individual receipts BEFORE grouping. groupby drops null keys;
+    # blank references must never be applied, even if an invoice ID is blank too.
+    missing_reference = (
+        payments["invoice_id"].isna()
+        | payments["invoice_id"].astype("string").str.strip().eq("").fillna(False)
+    )
+    reference_exists = payments["invoice_id"].isin(invoices["invoice_id"].dropna())
+    matched_reference = ~missing_reference & reference_exists
+
+    # Preserve one row per unmatched receipt, including repeated receipt records.
+    # Do not guess an invoice or normalize nonblank IDs during this classification.
+    unmatched_payments = payments.loc[~matched_reference].copy()
+    unmatched_payments["unmatched_reason"] = "Invoice reference not found"
+    unmatched_payments.loc[
+        missing_reference.loc[~matched_reference], "unmatched_reason"
+    ] = "Missing invoice reference"
+
+    # Only receipts with a known, nonblank invoice reference may be applied.
     payments_by_invoice = (
-        payments.groupby("invoice_id")
+        payments.loc[matched_reference].groupby("invoice_id")
         .agg(total_paid=("amount_paid", "sum"), payment_count=("payment_id", "count"))
         .reset_index()
     )
-
-    # Outer join: every invoice + every group of payments
-    merged = invoices.merge(
-        payments_by_invoice, on="invoice_id", how="outer", indicator=True
-    )
-
-    # Unmatched payments: invoice_id appears in payments but not in invoices
-    unmatched_mask = merged["_merge"] == "right_only"
-    unmatched_payments = payments[
-        payments["invoice_id"].isin(merged.loc[unmatched_mask, "invoice_id"])
-    ].copy()
-
-    # Drop unmatched-payment-only rows from the merged frame
-    merged = merged[merged["_merge"] != "right_only"].drop(columns="_merge")
+    merged = invoices.merge(payments_by_invoice, on="invoice_id", how="left")
     merged["total_paid"] = merged["total_paid"].fillna(0.0).round(2)
     merged["payment_count"] = merged["payment_count"].fillna(0).astype(int)
     merged["balance_due"] = (merged["amount_usd"] - merged["total_paid"]).round(2)
