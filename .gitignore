@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# macOS folder settings
+.DS_Store
+
+# Generated Excel reports
+/output/*.xlsx
