@@ -16,6 +16,29 @@ AR teams need more than a balance report: they need to identify remaining balanc
 
 The reports answer different questions: aging supports collections review; reconciliation explains receipt coverage and checks record and amount completeness.
 
+
+
+### Sample outputs
+
+#### AR aging summary
+
+Balances and aging buckets for collections review.
+
+![AR aging summary](docs/AgingSummary.png)
+
+#### Invoice-to-receipt coverage
+
+Invoice counts, original amounts, and remaining differences by receipt-coverage category.
+
+![Invoice-to-receipt coverage summary](docs/ReconciliationSummary.png)
+
+#### Reconciliation controls
+
+Results of the 15 automated reconciliation control checks.
+
+![Reconciliation control checks](docs/ReconciliationChecks.png)
+
+
 ### Sample balance bridge
 
 The supplied synthetic sample illustrates why reporting populations matter:
