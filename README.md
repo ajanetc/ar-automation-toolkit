@@ -20,11 +20,11 @@ The reports answer different questions: aging supports collections review; recon
 
 The supplied synthetic sample illustrates why reporting populations matter:
 
-| Measure                                        |                     USD |
-| ---------------------------------------------- | ----------------------: |
-| Net Unsettled Subledger Balance (All Statuses) |           $1,390,822.67 |
-| Less: Unsubstantiated Paid-Status Balances     |            −$69,108.08 |
-| Net Open AR (Active Non-Paid Subledger)        | **$1,321,714.59** |
+| Measure                                           |                     USD |
+| ------------------------------------------------- | ----------------------: |
+| Net Unsettled Subledger Balance (All Statuses AR) |           $1,390,822.67 |
+| Less: Unsubstantiated Paid-Status Balances        |            −$69,108.08 |
+| Net Open AR (Active Non-Paid Subledger)           | **$1,321,714.59** |
 
 Bridge Explanation: 
 
