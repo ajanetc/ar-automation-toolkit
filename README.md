@@ -32,6 +32,14 @@ Invoice counts, original amounts, and remaining differences by receipt-coverage 
 
 ![Invoice-to-receipt coverage summary](docs/ReconciliationSummary.png)
 
+**Why the report totals differ:**
+
+* Aging shows **$1,321,714.59** remaining on non-Paid invoices.
+* Reconciliation shows **$1,390,822.67** remaining across all invoice statuses, including **$69,108.08 on three invoices marked Paid without matching receipts in the supplied data**.
+* Aging lists those three separately under Paid Status Exceptions rather than including them in its main AR balance.
+
+* **Balance bridge:** $1,390,822.67 − $69,108.08 = $1,321,714.59.
+
 #### Reconciliation controls
 
 Results of the 15 automated reconciliation control checks.
