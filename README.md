@@ -4,15 +4,15 @@ Turn invoice and receipt exports into review-ready Excel reports for AR aging, c
 
 AR teams need more than a balance report: they need to identify remaining balances, investigate unsupported Paid statuses, and trace receipts that do not correspond to invoices in an extract. This Python toolkit makes those review steps repeatable while preserving source records and checking reconciliation completeness. It complements ERP reporting rather than replacing it.
 
-**Built with:** Python · pandas · openpyxl  
+**Built with:** Python · pandas · openpyxl
 **Portfolio project:** synthetic data · 67 automated reconciliation tests · 15 reconciliation control checks
 
 ## 1. Reports and sample results
 
-| Report | What it helps reviewers do |
-| --- | --- |
-| **AR Aging** — `aging_summary.xlsx` | Review balances by aging bucket, prioritize positive non-Paid balances, identify risk accounts, and inspect Paid-status exceptions. |
-| **Invoice-to-Receipt Reference Reconciliation** — `reconciliation_report.xlsx` | Trace receipt references, calculate coverage, investigate exceptions, and review control results. |
+| Report                                                                                  | What it helps reviewers do                                                                                                          |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| **AR Aging** — `aging_summary.xlsx`                                            | Review balances by aging bucket, prioritize positive non-Paid balances, identify risk accounts, and inspect Paid-status exceptions. |
+| **Invoice-to-Receipt Reference Reconciliation** — `reconciliation_report.xlsx` | Trace receipt references, calculate coverage, investigate exceptions, and review control results.                                   |
 
 The reports answer different questions: aging supports collections review; reconciliation explains receipt coverage and checks record and amount completeness.
 
@@ -20,13 +20,17 @@ The reports answer different questions: aging supports collections review; recon
 
 The supplied synthetic sample illustrates why reporting populations matter:
 
-| Measure | USD |
-| --- | ---: |
-| Signed invoice-minus-receipt difference, all statuses | $1,390,822.67 |
-| Less: signed differences on Paid-status invoices | −$69,108.08 |
-| Signed non-Paid balance, comparable to AR aging | **$1,321,714.59** |
+| Measure                                        |                     USD |
+| ---------------------------------------------- | ----------------------: |
+| Net Unsettled Subledger Balance (All Statuses) |           $1,390,822.67 |
+| Less: Unsubstantiated Paid-Status Balances     |            −$69,108.08 |
+| Net Open AR (Active Non-Paid Subledger)        | **$1,321,714.59** |
 
-This bridge explains the scope difference; it does not resolve Paid-status exceptions. Signed non-Paid AR, overdue AR, and positive-only collections balances are distinct measures. The bridge is calculated within reconciliation—not by opening and comparing the aging workbook.
+Bridge Explanation: 
+
+* **Exception Preservation:** Reconciles workbook scope differences without auto-clearing unsubstantiated`Paid`-status exceptions, which remain isolated for review
+* **Metric Separation:** Keeps Net Open AR (all active non-`Paid`balances, including credits), Past-Due AR (past due date), and Collectible Debit Balances (positive-only collections worklists) distinct.
+* **Independent Control:** Derives the tie-out directly from source extracts rather than reading the aging workbook, making cross-report agreement an independent completeness check
 
 ## 2. How it works
 
@@ -90,10 +94,10 @@ The aging invoice path is **positional**, not `--input`. Use either script's `--
 
 ## 4. Inputs and accounting rules
 
-| Input | Required columns | Row basis |
-| --- | --- | --- |
-| `invoices_sample.csv` | `invoice_id`, `customer_name`, `invoice_date`, `due_date`, `amount_usd`, `status`, `days_overdue`, `po_number` | One row per invoice, not per product line. |
-| `payment_receipts.csv` | `payment_id`, `invoice_id`, `payment_date`, `amount_paid` | One uniquely identified receipt intended for one invoice. |
+| Input                    | Required columns                                                                                                               | Row basis                                                 |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
+| `invoices_sample.csv`  | `invoice_id`, `customer_name`, `invoice_date`, `due_date`, `amount_usd`, `status`, `days_overdue`, `po_number` | One row per invoice, not per product line.                |
+| `payment_receipts.csv` | `payment_id`, `invoice_id`, `payment_date`, `amount_paid`                                                              | One uniquely identified receipt intended for one invoice. |
 
 - **Balance:** original invoice amount (`amount_usd`) minus supplied matching receipts. Do not subtract receipts again from an already-net ERP balance; receipt coverage must be appropriate for the original amounts.
 - **Identifiers:** payment IDs must be nonblank and unique. Multiple receipts may reference one invoice. Reconciliation preserves leading zeros; nonblank identifiers are compared as supplied, without automatic whitespace/case normalization.
@@ -106,9 +110,9 @@ Running aging without `--payments` does not evaluate receipt support.
 
 ## 5. Workbook guide
 
-| Workbook | Tabs |
-| --- | --- |
-| Aging | **Summary** (including Report Basis), **All Invoices**, **Payment Receipts**, **Detail >30d**, **Risk Accounts**, **Paid Status Exceptions**, **Credit Balances**, **Validation Issues** |
+| Workbook       | Tabs                                                                                                                                                                                                                                      |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Aging          | **Summary** (including Report Basis), **All Invoices**, **Payment Receipts**, **Detail >30d**, **Risk Accounts**, **Paid Status Exceptions**, **Credit Balances**, **Validation Issues**  |
 | Reconciliation | **Summary**, **Reconciliation Checks**, **Fully Covered**, **Partial Coverage**, **Receipts Without Invoices**, **No Positive Receipts**, **Excess Receipts**, **Paid Status Exceptions** |
 
 **Detail >30d** contains positive non-Paid balances over 30 days overdue. Reconciliation coverage categories partition invoices; **Paid Status Exceptions** is an overlapping review subset, not an additional category to add to totals.
@@ -119,12 +123,12 @@ Reconciliation blocks missing required columns, unreadable inputs, duplicate non
 
 Its **15 control checks** cover source totals, record completeness, reference membership, per-invoice receipt association, and invoice-category completeness.
 
-| Status | Meaning | Output / exit code |
-| --- | --- | --- |
-| PASS | Checks agree; no counted review exceptions remain. | Normal report; `0` |
-| REVIEW | Checks agree; receipts without invoices, excess receipts, or Paid-status positive residuals need review. | Normal report; `0` |
-| BLOCKED | Critical input issues prevent reconciliation. | `reconciliation_diagnostics.xlsx`; `2` |
-| FAIL | A financial/control check fails. | `reconciliation_report_failed_checks.xlsx`; `3` |
+| Status  | Meaning                                                                                                  | Output / exit code                                  |
+| ------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| PASS    | Checks agree; no counted review exceptions remain.                                                       | Normal report; `0`                                |
+| REVIEW  | Checks agree; receipts without invoices, excess receipts, or Paid-status positive residuals need review. | Normal report; `0`                                |
+| BLOCKED | Critical input issues prevent reconciliation.                                                            | `reconciliation_diagnostics.xlsx`; `2`          |
+| FAIL    | A financial/control check fails.                                                                         | `reconciliation_report_failed_checks.xlsx`; `3` |
 
 These filenames assume the default output path. Diagnostics retain loaded source records and identify affected rows. A blocked or failed run **does not refresh the normal report**; check terminal messages and workbook timestamps before using existing files. Old diagnostics may also remain after a successful rerun.
 
