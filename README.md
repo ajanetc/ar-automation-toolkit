@@ -26,7 +26,7 @@ The supplied synthetic sample illustrates why reporting populations matter:
 | Less: Unsubstantiated Paid-Status Balances        |            −$69,108.08 |
 | Net Open AR (Active Non-Paid Subledger)           | **$1,321,714.59** |
 
-Bridge Explanation: 
+Bridge Explanation:
 
 * **Exception Preservation:** Reconciles workbook scope differences without auto-clearing unsubstantiated `Paid`-status exceptions, which remain isolated for review
 * **Metric Separation:** Keeps Net Open AR (all active non-`Paid`balances, including credits), Past-Due AR (past due date), and Collectible Debit Balances (positive-only collections worklists) distinct.
@@ -51,7 +51,7 @@ Reconciliation preserves full receipt amounts and directional balance variances,
 
 ## 3. Quickstart
 
-Use **Python 3.11+**. Run commands from the repository root.
+Use Python 3.11 (verified with Python 3.11.7 on macOS, Apple Silicon). Run commands from the repository root.
 
 ```bash
 git clone https://github.com/ajanetc/ar-automation-toolkit.git
@@ -62,13 +62,13 @@ Create and activate a virtual environment:
 
 ```bash
 # macOS / Linux
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 ```
 
 ```powershell
 # Windows PowerShell
-py -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
@@ -81,7 +81,9 @@ python src/ar_aging_automation.py --payments data/payment_receipts.csv
 python -m unittest discover -s tests -p "test_reconcile_*.py" -v
 ```
 
-Default inputs are `data/invoices_sample.csv` and `data/payment_receipts.csv`; reports are written to `output/`. The current reconciliation suite contains **67 tests**; this is not complete aging or end-to-end coverage. Fresh-clone and cross-platform setup verification remain publication tasks.
+Default inputs are `data/invoices_sample.csv` and `data/payment_receipts.csv`; reports are written to `output/`. The current reconciliation suite contains **67 tests**; this is not complete aging or end-to-end coverage. 
+
+Verified from a fresh repository copy using a clean Python 3.11.7 environment on macOS (Apple Silicon): both reports generated, reconciliation controls passed, all 67 reconciliation tests passed, and both workbooks opened successfully. Windows and Linux setup instructions have not yet been verified.
 
 For custom paths:
 
@@ -122,7 +124,6 @@ Running aging without `--payments` does not evaluate receipt support (aging scri
 ## 6. Validation, controls, and run statuses
 
 **Preventive Input Controls:** Before matching receipts, the script validates source schemas, identifier uniqueness, and cent-level numeric integrity. Missing columns, unreadable or negative amounts, duplicate invoice IDs, blank or duplicate payment IDs, and sub-cent or precision-loss values halt the run (`BLOCKED`) and route all flagged rows to a diagnostic workbook without overwriting prior valid reports
-
 
 Its **15 control checks** cover source totals, record completeness, reference membership (valid invoice-reference matching), per-invoice receipt association, and invoice-category completeness.
 
