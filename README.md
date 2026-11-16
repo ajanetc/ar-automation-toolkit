@@ -28,7 +28,7 @@ The supplied synthetic sample illustrates why reporting populations matter:
 
 Bridge Explanation: 
 
-* **Exception Preservation:** Reconciles workbook scope differences without auto-clearing unsubstantiated`Paid`-status exceptions, which remain isolated for review
+* **Exception Preservation:** Reconciles workbook scope differences without auto-clearing unsubstantiated `Paid`-status exceptions, which remain isolated for review
 * **Metric Separation:** Keeps Net Open AR (all active non-`Paid`balances, including credits), Past-Due AR (past due date), and Collectible Debit Balances (positive-only collections worklists) distinct.
 * **Independent Control:** Derives the tie-out directly from source extracts rather than reading the aging workbook, making cross-report agreement an independent completeness check
 
