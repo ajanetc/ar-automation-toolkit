@@ -45,7 +45,7 @@ Invoice CSV + Receipt CSV
            └── Excel reports → finance review
 ```
 
-Reconciliation preserves full receipt amounts and signed differences. It separates fully covered invoices, partial coverage, no positive receipts, excess receipts, and receipts without corresponding invoices. One-cent differences remain visible.
+Reconciliation preserves full receipt amounts and directional balance variances, keeping both remaining receivables (+) and overpayment credits (-) visible down to the cent. It separates fully covered invoices, partial coverage, no positive receipts, excess receipts, and receipts without corresponding invoices.
 
 **Example:** a $10,000 invoice with $9,950 in matching receipts has $50 of remaining coverage to review.
 
@@ -106,7 +106,7 @@ The aging invoice path is **positional**, not `--input`. Use either script's `--
 - **Aging buckets:** Current, 1–30, 31–60, 61–90, and 90+; `90+` means more than 90 days.
 - **Risk accounts:** at least 3 overdue eligible invoices **or** $10,000 in overdue eligible balance.
 
-Running aging without `--payments` does not evaluate receipt support.
+Running aging without `--payments` does not evaluate receipt support (aging script only checks payment receipts if you tell it to load the receipt file).
 
 ## 5. Workbook guide
 
@@ -115,13 +115,16 @@ Running aging without `--payments` does not evaluate receipt support.
 | Aging          | **Summary** (including Report Basis), **All Invoices**, **Payment Receipts**, **Detail >30d**, **Risk Accounts**, **Paid Status Exceptions**, **Credit Balances**, **Validation Issues**  |
 | Reconciliation | **Summary**, **Reconciliation Checks**, **Fully Covered**, **Partial Coverage**, **Receipts Without Invoices**, **No Positive Receipts**, **Excess Receipts**, **Paid Status Exceptions** |
 
-**Detail >30d** contains positive non-Paid balances over 30 days overdue. Reconciliation coverage categories partition invoices; **Paid Status Exceptions** is an overlapping review subset, not an additional category to add to totals.
+- **Collections Focus (`Detail >30d`):** Isolates past-due collectible receivables (positive non-`Paid` balances more than 30 days overdue) for collections outreach.
+- **Mutually Exclusive Coverage Categories:** Every source invoice lands in exactly one of the four coverage tabs (`Fully Covered`, `Partial Coverage`, `No Positive Receipts`, or `Excess Receipts`), so their counts and amounts foot to 100% of the invoice extract.
+- **Overlapping Exception Subset (`Paid Status Exceptions`):** Surfaces `Paid`-status invoices with positive shortfalls as a cross-cutting review filter; do not add this tab to the coverage category totals, as those invoices are already included above.
 
 ## 6. Validation, controls, and run statuses
 
-Reconciliation blocks missing required columns, unreadable inputs, duplicate nonblank invoice IDs, blank/duplicate payment IDs, and invalid amounts—including unsupported negative, non-finite, or sub-cent values and amounts that cannot retain cent precision.
+**Preventive Input Controls:** Before matching receipts, the script validates source schemas, identifier uniqueness, and cent-level numeric integrity. Missing columns, unreadable or negative amounts, duplicate invoice IDs, blank or duplicate payment IDs, and sub-cent or precision-loss values halt the run (`BLOCKED`) and route all flagged rows to a diagnostic workbook without overwriting prior valid reports
 
-Its **15 control checks** cover source totals, record completeness, reference membership, per-invoice receipt association, and invoice-category completeness.
+
+Its **15 control checks** cover source totals, record completeness, reference membership (valid invoice-reference matching), per-invoice receipt association, and invoice-category completeness.
 
 | Status  | Meaning                                                                                                  | Output / exit code                                  |
 | ------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
@@ -160,7 +163,5 @@ ar-automation-toolkit/
 Generated Excel reports and `.DS_Store` files are excluded from Git.
 
 ## 9. Roadmap
-
-**Next:** add selected report screenshots, verify setup from a fresh clone, expand aging/cross-report tests, and align validation safeguards across both scripts.
 
 **Potential future extensions—not current features:** SQLite storage, ERP export/API adapters, explicit receipt-allocation rules, historical snapshots, and an MCP-compatible interface. Each requires defined accounting rules and additional testing before implementation.
