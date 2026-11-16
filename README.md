@@ -32,13 +32,13 @@ Invoice counts, original amounts, and remaining differences by receipt-coverage 
 
 ![Invoice-to-receipt coverage summary](docs/ReconciliationSummary.png)
 
-**Why the report totals differ:**
+**Cross-Report Reconciliation Bridge:** Both workbooks include the **$74,516.19** remaining balance on partially paid open invoices. The **$69,108.08** variance between report totals is explained entirely by **three invoices marked `Paid` with no matching cash receipts**—retained inside *No Positive Receipts* in the reconciliation summary, but excluded from collectible AR and isolated on the *Paid Status Exceptions* tab in the aging workbook:
 
-* Aging shows **$1,321,714.59** remaining on non-Paid invoices.
-* Reconciliation shows **$1,390,822.67** remaining across all invoice statuses, including **$69,108.08 on three invoices marked Paid without matching receipts in the supplied data**.
-* Aging lists those three separately under Paid Status Exceptions rather than including them in its main AR balance.
-
-* **Balance bridge:** $1,390,822.67 − $69,108.08 = $1,321,714.59.
+| Report Component                                    |                      Amount | Treatment of `$69,108.08` Variance                   |
+| :-------------------------------------------------- | --------------------------: | :----------------------------------------------------- |
+| **Reconciliation Positive Residuals**         |           `$1,390,822.67` | Included within *No Positive Receipts*               |
+| **Less: Paid-Status Exceptions (3 invoices)** |            `($69,108.08)` | Marked `Paid` in source extract without receipts     |
+| **Aging Collectible AR Balance**              | **`$1,321,714.59`** | Isolated on *Paid Status Exceptions* (outside aging) |
 
 #### Reconciliation controls
 
