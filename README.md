@@ -33,6 +33,7 @@ Invoice counts, original amounts, and remaining differences by receipt-coverage 
 ![Invoice-to-receipt coverage summary](docs/ReconciliationSummary.png)
 
 
+
 **Cross-Report Reconciliation Bridge:** Both workbooks include the **$74,516.19** remaining balance on partially paid open invoices. The **$69,108.08** variance between report totals is explained entirely by **three invoices marked `Paid` with no matching cash receipts**—retained inside *No Positive Receipts* in the reconciliation summary, but excluded from collectible AR and isolated on the *Paid Status Exceptions* tab in the aging workbook:
 
 | Report Component                                    |                      Amount | Treatment of `$69,108.08` Variance                   |
